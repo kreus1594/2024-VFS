@@ -97,7 +97,7 @@ def test_gmm(opt, test_loader, model, board):
         im_g = inputs['grid_image'].cuda()
         shape_ori = inputs['shape_ori']  # original body shape without blurring
 
-        grid, theta = model(agnostic, cm)
+        grid, theta, _ = model(agnostic, cm)
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
         warped_mask = F.grid_sample(cm, grid, padding_mode='zeros')
         warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')

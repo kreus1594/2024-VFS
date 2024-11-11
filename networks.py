@@ -1,11 +1,35 @@
 # coding=utf-8
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import init
 from torchvision import models
 import os
 
 import numpy as np
+
+class Swish(nn.Module):
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+
+class AttentionLayer(nn.Module):
+    def __init__(self, channels):
+        super(AttentionLayer, self).__init__()
+        self.q = nn.Conv2d(channels, channels // 8, 1)
+        self.k = nn.Conv2d(channels, channels // 8, 1)
+        self.v = nn.Conv2d(channels, channels, 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        q = self.q(x).view(b, -1, h * w).permute(0, 2, 1)
+        k = self.k(x).view(b, -1, h * w)
+        v = self.v(x).view(b, -1, h * w)
+
+        attn = F.softmax(torch.bmm(q, k), dim=-1)
+        out = torch.bmm(v, attn.permute(0, 2, 1)).view(b, c, h, w)
+        return self.gamma * out + x
 
 
 def weights_init_normal(m):
@@ -132,7 +156,7 @@ class FeatureRegression(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         x = self.linear(x)
         x = self.tanh(x)
         return x
@@ -503,16 +527,49 @@ class GMM(nn.Module):
 
     def __init__(self, opt):
         super(GMM, self).__init__()
-        self.extractionA = FeatureExtraction(
-            22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
-        self.extractionB = FeatureExtraction(
-            1, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.extractionA = FeatureExtraction(22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.extractionB = FeatureExtraction(1, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
-        self.regression = FeatureRegression(
-            input_nc=192, output_dim=2*opt.grid_size**2, use_cuda=True)
-        self.gridGen = TpsGridGen(
-            opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
+
+        # 경계 감지를 위한 레이어
+        self.boundary_detection = nn.Sequential(
+            nn.Conv2d(192, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            Swish(),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+        # 기존 regression 모듈을 수정하여 Swish와 Attention 추가
+        self.regression = nn.Sequential(
+            nn.Conv2d(192, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            Swish(),
+            AttentionLayer(512),
+            nn.Conv2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            Swish(),
+            AttentionLayer(256),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            Swish(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            Swish(),
+            nn.Flatten(),
+            nn.Linear(64 * 4 * 3, 2 * opt.grid_size ** 2)
+        )
+
+        # 기하학적 보정을 위한 레이어
+        self.geometric_correction = nn.Sequential(
+            nn.Conv2d(192, 192, kernel_size=3, padding=1),
+            nn.BatchNorm2d(192),
+            Swish(),
+            SpatialAttention()
+        )
+
+        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, grid_size=opt.grid_size)
 
     def forward(self, inputA, inputB):
         featureA = self.extractionA(inputA)
@@ -523,8 +580,25 @@ class GMM(nn.Module):
 
         theta = self.regression(correlation)
         grid = self.gridGen(theta)
-        return grid, theta
 
+        # boundary 계산
+        boundary = self.boundary_detection(correlation)
+
+        return grid, theta, boundary  # boundary 반환 추가
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv(x)
+        return self.sigmoid(x) * x
 
 def save_checkpoint(model, save_path):
     if not os.path.exists(os.path.dirname(save_path)):

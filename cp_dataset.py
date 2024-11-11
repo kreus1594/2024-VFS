@@ -27,9 +27,20 @@ class CPDataset(data.Dataset):
         self.fine_width = opt.fine_width
         self.radius = opt.radius
         self.data_path = osp.join(opt.dataroot, opt.datamode)
+        # self.transform = transforms.Compose([
+        #     transforms.ToTensor(),
+        #     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
         self.transform = transforms.Compose([
+            # transforms.Resize((512, 384)),  # 더 높은 해상도
+            # transforms.ColorJitter(brightness=0.1, contrast=0.1),  # 대비 개선
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+            transforms.Normalize((0.5,), (0.5,))  # 단일 채널용
+        ])
+
+        self.transform_rgb = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # RGB 이미지용
+        ])
 
         # load data list
         im_names = []
@@ -56,7 +67,7 @@ class CPDataset(data.Dataset):
             c = Image.open(osp.join(self.data_path, 'warp-cloth', im_name))    # c_name, if that is used when saved
             cm = Image.open(osp.join(self.data_path, 'warp-mask', im_name)).convert('L')    # c_name, if that is used when saved
 
-        c = self.transform(c)  # [-1,1]
+        c = self.transform_rgb(c)  # [-1,1]
         cm_array = np.array(cm)
         cm_array = (cm_array >= 128).astype(np.float32)
         cm = torch.from_numpy(cm_array)  # [0,1]
@@ -64,7 +75,7 @@ class CPDataset(data.Dataset):
 
         # person image
         im = Image.open(osp.join(self.data_path, 'image', im_name))
-        im = self.transform(im)  # [-1,1]
+        im = self.transform_rgb(im)  # [-1,1]
 
         """
         LIP labels

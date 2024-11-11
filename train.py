@@ -49,6 +49,8 @@ def get_opt():
     parser.add_argument("--decay_step", type=int, default=100000)
     parser.add_argument("--shuffle", action='store_true',
                         help='shuffle input data')
+    parser.add_argument('--lambda_boundary', type=float, default=1.0,
+                        help='weight for boundary loss')
 
     opt = parser.parse_args()
     return opt
@@ -57,7 +59,6 @@ def get_opt():
 def train_gmm(opt, train_loader, model, board):
     model.cuda()
     model.train()
-
     # criterion
     criterionL1 = nn.L1Loss()
     gicloss = GicLoss(opt)
@@ -65,12 +66,12 @@ def train_gmm(opt, train_loader, model, board):
     optimizer = torch.optim.Adam(
         model.parameters(), lr=opt.lr, betas=(0.5, 0.999))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: 1.0 -
-                                                  max(0, step - opt.keep_step) / float(opt.decay_step + 1))
-
+                                                                                    max(0,
+                                                                                        step - opt.keep_step) / float(
+        opt.decay_step + 1))
     for step in range(opt.keep_step + opt.decay_step):
         iter_start_time = time.time()
         inputs = train_loader.next_batch()
-
         im = inputs['image'].cuda()
         im_pose = inputs['pose_image'].cuda()
         im_h = inputs['head'].cuda()
@@ -81,43 +82,56 @@ def train_gmm(opt, train_loader, model, board):
         im_c = inputs['parse_cloth'].cuda()
         im_g = inputs['grid_image'].cuda()
 
-        grid, theta = model(agnostic, cm)    # can be added c too for new training
+        grid, theta, boundary = model(agnostic, cm)
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
         warped_mask = F.grid_sample(cm, grid, padding_mode='zeros')
         warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
 
         visuals = [[im_h, shape, im_pose],
                    [c, warped_cloth, im_c],
-                   [warped_grid, (warped_cloth+im)*0.5, im]]
+                   [warped_grid, (warped_cloth + im) * 0.5, im]]
 
         # loss for warped cloth
-        Lwarp = criterionL1(warped_cloth, im_c)    # changing to previous code as it corresponds to the working code
-        # Actual loss function as in the paper given below (comment out previous line and uncomment below to train as per the paper)
-        # Lwarp = criterionL1(warped_mask, cm)    # loss for warped mask thanks @xuxiaochun025 for fixing the git code.
-        
+        Lwarp = criterionL1(warped_cloth, im_c)
+
         # grid regularization loss
         Lgic = gicloss(grid)
-        # 200x200 = 40.000 * 0.001
         Lgic = Lgic / (grid.shape[0] * grid.shape[1] * grid.shape[2])
 
-        loss = Lwarp + 40 * Lgic    # total GMM loss
+        # boundary loss - 크기를 맞추기 위해 boundary를 업스케일
+        boundary_upsampled = F.interpolate(boundary, size=(opt.fine_height, opt.fine_width), mode='bilinear',
+                                           align_corners=True)
+
+        im_c_gray = torch.mean(im_c, dim=1, keepdim=True)
+        target_boundary = F.conv2d(im_c_gray.float(),
+                                   torch.ones(1, 1, 3, 3).cuda(),
+                                   padding=1)
+        target_boundary = (target_boundary > 0) & (target_boundary < 9)
+        target_boundary = target_boundary.float()
+
+        Lboundary = criterionL1(boundary_upsampled, target_boundary)
+
+        # total loss
+        loss = Lwarp + 40 * Lgic + opt.lambda_boundary * Lboundary
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
-        if (step+1) % opt.display_count == 0:
-            board_add_images(board, 'combine', visuals, step+1)
-            board.add_scalar('loss', loss.item(), step+1)
-            board.add_scalar('40*Lgic', (40*Lgic).item(), step+1)
-            board.add_scalar('Lwarp', Lwarp.item(), step+1)
+        if (step + 1) % opt.display_count == 0:
+            board_add_images(board, 'combine', visuals, step + 1)
+            board.add_scalar('loss', loss.item(), step + 1)
+            board.add_scalar('40*Lgic', (40 * Lgic).item(), step + 1)
+            board.add_scalar('Lwarp', Lwarp.item(), step + 1)
+            board.add_scalar('Lboundary', Lboundary.item(), step + 1)
             t = time.time() - iter_start_time
-            print('step: %8d, time: %.3f, loss: %4f, (40*Lgic): %.8f, Lwarp: %.6f' %
-                  (step+1, t, loss.item(), (40*Lgic).item(), Lwarp.item()), flush=True)
+            print('step: %8d, time: %.3f, loss: %4f, (40*Lgic): %.8f, Lwarp: %.6f, Lboundary: %.6f' %
+                  (step + 1, t, loss.item(), (40 * Lgic).item(), Lwarp.item(), Lboundary.item()), flush=True)
 
-        if (step+1) % opt.save_count == 0:
+        if (step + 1) % opt.save_count == 0:
             save_checkpoint(model, os.path.join(
-                opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step+1)))
+                opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
 
 
 def train_tom(opt, train_loader, model, board):
