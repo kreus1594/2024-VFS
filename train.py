@@ -138,6 +138,8 @@ def train_tom(opt, train_loader, model, board):
     model.cuda()
     model.train()
 
+    #test
+
     # criterion
     criterionL1 = nn.L1Loss()
     criterionVGG = VGGLoss()
